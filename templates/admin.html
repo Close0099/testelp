@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel Administrativo - Estatísticas</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="admin-container">
+        <header class="header">
+            <h1>📊 Painel Administrativo</h1>
+            <div class="header-info">
+                <span id="dataAtual" class="data-badge">📅 Hoje: <span id="dataAtualTexto"></span></span>
+                <div class="header-buttons">
+                    <a href="/" class="btn-back">← Votação</a>
+                    <a href="/logout" class="btn-logout">🚪 Sair</a>
+                </div>
+            </div>
+        </header>
+        
+        <div class="stats-overview">
+            <div class="stat-card">
+                <div class="stat-icon">📈</div>
+                <div class="stat-content">
+                    <div class="stat-label">Total de Avaliações</div>
+                    <div class="stat-value" id="total-avaliacoes">0</div>
+                </div>
+            </div>
+            
+            <div class="stat-card success">
+                <div class="stat-icon">😊</div>
+                <div class="stat-content">
+                    <div class="stat-label">Muito Satisfeito</div>
+                    <div class="stat-value" id="muito-satisfeito">0</div>
+                    <div class="stat-percent" id="muito-satisfeito-percent">0%</div>
+                </div>
+            </div>
+            
+            <div class="stat-card warning">
+                <div class="stat-icon">😐</div>
+                <div class="stat-content">
+                    <div class="stat-label">Satisfeito</div>
+                    <div class="stat-value" id="satisfeito">0</div>
+                    <div class="stat-percent" id="satisfeito-percent">0%</div>
+                </div>
+            </div>
+            
+            <div class="stat-card danger">
+                <div class="stat-icon">😞</div>
+                <div class="stat-content">
+                    <div class="stat-label">Insatisfeito</div>
+                    <div class="stat-value" id="insatisfeito">0</div>
+                    <div class="stat-percent" id="insatisfeito-percent">0%</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="charts-container">
+            <div class="chart-card">
+                <h2>Distribuição de Satisfação</h2>
+                <canvas id="satisfacaoChart"></canvas>
+            </div>
+            
+            <div class="chart-card">
+                <h2>Avaliações por Dia da Semana</h2>
+                <canvas id="diaSemanaChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="chart-card full-width">
+            <h2>Evolução Diária (Últimos 30 dias)</h2>
+            <canvas id="evolucaoDiariaChart"></canvas>
+        </div>
+        
+        <!-- Filtros -->
+        <div class="filters-section">
+            <h2>🔍 Filtros e Análise</h2>
+            <div class="filters-grid">
+                <div class="filter-group">
+                    <label for="dataInicio">Data Início:</label>
+                    <input type="date" id="dataInicio">
+                </div>
+                <div class="filter-group">
+                    <label for="dataFim">Data Fim:</label>
+                    <input type="date" id="dataFim">
+                </div>
+                <div class="filter-group">
+                    <label for="diaComparacao1">Comparar Dia 1:</label>
+                    <input type="date" id="diaComparacao1">
+                </div>
+                <div class="filter-group">
+                    <label for="diaComparacao2">Comparar Dia 2:</label>
+                    <input type="date" id="diaComparacao2">
+                </div>
+            </div>
+            <div class="filter-buttons">
+                <button class="btn-filter" onclick="aplicarFiltros()">🔎 Filtrar</button>
+                <button class="btn-filter secondary" onclick="mostrarHoje()">📅 Hoje</button>
+                <button class="btn-filter secondary" onclick="ultimos7Dias()">📊 Últimos 7 dias</button>
+                <button class="btn-filter secondary" onclick="limparFiltros()">🔄 Limpar</button>
+                <button class="btn-filter secondary" onclick="compararDias()">📊 Comparar</button>
+            </div>
+        </div>
+        
+        <!-- Resultado da Comparação -->
+        <div id="comparacaoResult" class="comparacao-result" style="display:none;">
+            <h2>📈 Comparação entre Dias</h2>
+            <div class="comparacao-grid">
+                <div class="comparacao-card">
+                    <h3 id="comparacao-dia1-label">Dia 1</h3>
+                    <div class="comparacao-stats">
+                        <p><strong>Total:</strong> <span id="comparacao-dia1-total">0</span></p>
+                        <p><strong>😊 Muito Satisfeito:</strong> <span id="comparacao-dia1-ms">0</span></p>
+                        <p><strong>😐 Satisfeito:</strong> <span id="comparacao-dia1-s">0</span></p>
+                        <p><strong>😞 Insatisfeito:</strong> <span id="comparacao-dia1-i">0</span></p>
+                    </div>
+                </div>
+                <div class="comparacao-card">
+                    <h3 id="comparacao-dia2-label">Dia 2</h3>
+                    <div class="comparacao-stats">
+                        <p><strong>Total:</strong> <span id="comparacao-dia2-total">0</span></p>
+                        <p><strong>😊 Muito Satisfeito:</strong> <span id="comparacao-dia2-ms">0</span></p>
+                        <p><strong>😐 Satisfeito:</strong> <span id="comparacao-dia2-s">0</span></p>
+                        <p><strong>😞 Insatisfeito:</strong> <span id="comparacao-dia2-i">0</span></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="table-container">
+            <div class="table-header">
+                <h2>Histórico de Avaliações</h2>
+                <div class="header-actions">
+                    <button class="btn-refresh" onclick="loadStats()">🔄 Atualizar</button>
+                    <button class="btn-export" onclick="exportExcel()">📊 Excel</button>
+                    <button class="btn-export" onclick="openExportTxt()">📝 TXT</button>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table id="avaliacoes-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Satisfação</th>
+                            <th>Data</th>
+                            <th>Hora</th>
+                            <th>Dia da Semana</th>
+                        </tr>
+                    </thead>
+                    <tbody id="avaliacoes-tbody">
+                        <tr>
+                            <td colspan="5" class="loading">Carregando dados...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Paginação -->
+            <div class="paginacao" id="paginacao" style="display:none;">
+                <button class="btn-paginacao" onclick="paginacaoAnterior()">← Anterior</button>
+                <div class="info-paginacao">
+                    Página <span id="pagina-atual">1</span> de <span id="total-paginas">1</span>
+                    (<span id="total-registos">0</span> registos)
+                </div>
+                <button class="btn-paginacao" onclick="paginacaoProxima()">Próxima →</button>
+            </div>
+        </div>
+        
+        <!-- Modal para exportar TXT com filtro -->
+        <div id="exportModal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeExportTxt()">&times;</span>
+                <h2>Exportar para TXT</h2>
+                <p>Selecione o período (opcional - deixe vazio para exportar tudo)</p>
+                
+                <div class="form-group">
+                    <label for="dataInicio">Data Início:</label>
+                    <input type="date" id="dataInicio">
+                </div>
+                
+                <div class="form-group">
+                    <label for="dataFim">Data Fim:</label>
+                    <input type="date" id="dataFim">
+                </div>
+                
+                <div class="modal-buttons">
+                    <button onclick="exportTxt()" class="btn-modal-export">📥 Descarregar TXT</button>
+                    <button onclick="closeExportTxt()" class="btn-modal-cancel">Cancelar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+</body>
+</html>
+
