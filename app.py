@@ -5,8 +5,13 @@ import os
 from io import StringIO, BytesIO
 import csv
 from functools import wraps
+import uuid
 
-from pymongo import MongoClient
+try:
+    from replit import db as replit_db
+    HAS_REPLIT_DB = True
+except ImportError:
+    HAS_REPLIT_DB = False
 
 try:
     from openpyxl import Workbook
@@ -21,21 +26,23 @@ CORS(app)
 app.secret_key = os.environ.get('SECRET_KEY', 'sua-chave-secreta-mude-em-producao')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '1234')
 
-# MongoDB
-MONGODB_URI = os.environ.get('MONGODB_URI')
-MONGODB_DB = os.environ.get('MONGODB_DB', 'project0')
-db = None
+# Replit DB
+REPLIT_DB_URL = os.environ.get('REPLIT_DB_URL')
+USE_REPLIT_DB = bool(REPLIT_DB_URL and HAS_REPLIT_DB)
 
-if MONGODB_URI:
-    try:
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-        db = client.get_default_database()
-        if db is None:
-            db = client[MONGODB_DB]
-        db.command('ping')
-    except Exception as e:
-        print(f"Erro ao conectar MongoDB: {e}")
-        db = None
+def _replit_get_all():
+    registros = replit_db.get('avaliacoes', [])
+    if not isinstance(registros, list):
+        return []
+    return registros
+
+def _replit_save_all(registros):
+    replit_db['avaliacoes'] = registros
+
+def _replit_add(avaliacao):
+    registros = _replit_get_all()
+    registros.append(avaliacao)
+    _replit_save_all(registros)
 
 def login_required(f):
     @wraps(f)
@@ -75,7 +82,7 @@ def logout():
 @app.route('/api/vote', methods=['POST'])
 def vote():
     try:
-        if not db:
+        if not USE_REPLIT_DB:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data = request.get_json()
@@ -91,13 +98,16 @@ def vote():
         dias_semana = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
         dia_semana = dias_semana[agora.weekday()]
         
-        db['avaliacoes'].insert_one({
+        registro = {
+            'id': str(uuid.uuid4()),
             'grau_satisfacao': satisfacao,
             'data': data_str,
             'hora': hora_str,
             'dia_semana': dia_semana,
-            'timestamp': agora
-        })
+            'timestamp': agora.isoformat()
+        }
+
+        _replit_add(registro)
         
         return jsonify({'success': True, 'message': 'Obrigado pelo seu feedback!'})
     
@@ -107,7 +117,7 @@ def vote():
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
     try:
-        if not db:
+        if not USE_REPLIT_DB:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data_inicio = request.args.get('data_inicio')
@@ -115,11 +125,9 @@ def get_stats():
         pagina = int(request.args.get('pagina', 1))
         limite = 20
         
-        query = {}
+        docs = _replit_get_all()
         if data_inicio and data_fim:
-            query = {'data': {'$gte': data_inicio, '$lte': data_fim}}
-        
-        docs = list(db['avaliacoes'].find(query))
+            docs = [d for d in docs if data_inicio <= d.get('data', '') <= data_fim]
         total = len(docs)
         
         satisfacao_counts = {}
@@ -146,8 +154,7 @@ def get_stats():
         else:
             ultimas = []
         
-        for av in ultimas:
-            av['_id'] = str(av.get('_id', ''))
+        # ids já são strings no Replit DB
         
         total_paginas = (total + limite - 1) // limite
         
@@ -171,7 +178,7 @@ def get_stats():
 @app.route('/api/stats/comparacao', methods=['GET'])
 def stats_comparacao():
     try:
-        if not db:
+        if not USE_REPLIT_DB:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         dia1 = request.args.get('dia1')
@@ -180,13 +187,13 @@ def stats_comparacao():
         if not dia1 or not dia2:
             return jsonify({'error': 'Parâmetros dia1 e dia2 obrigatórios'}), 400
         
-        docs1 = list(db['avaliacoes'].find({'data': dia1}))
+        docs1 = [d for d in _replit_get_all() if d.get('data') == dia1]
         stats_dia1 = {}
         for doc in docs1:
             grau = doc.get('grau_satisfacao')
             stats_dia1[grau] = stats_dia1.get(grau, 0) + 1
         
-        docs2 = list(db['avaliacoes'].find({'data': dia2}))
+        docs2 = [d for d in _replit_get_all() if d.get('data') == dia2]
         stats_dia2 = {}
         for doc in docs2:
             grau = doc.get('grau_satisfacao')
@@ -211,10 +218,10 @@ def stats_comparacao():
 @app.route('/api/export/excel', methods=['GET'])
 def export_excel():
     try:
-        if not db:
+        if not USE_REPLIT_DB:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
-        rows = list(db['avaliacoes'].find().sort('timestamp', 1))
+        rows = sorted(_replit_get_all(), key=lambda r: r.get('timestamp', ''))
         
         if not rows:
             return jsonify({'error': 'Sem dados para exportar'}), 400
@@ -299,18 +306,17 @@ def export_excel():
 @app.route('/api/export/txt', methods=['POST'])
 def export_txt():
     try:
-        if not db:
+        if not USE_REPLIT_DB:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data = request.get_json() if request.is_json else {}
         data_inicio = data.get('data_inicio')
         data_fim = data.get('data_fim')
         
-        query = {}
+        rows = _replit_get_all()
         if data_inicio and data_fim:
-            query = {'data': {'$gte': data_inicio, '$lte': data_fim}}
-        
-        rows = list(db['avaliacoes'].find(query).sort('timestamp', 1))
+            rows = [r for r in rows if data_inicio <= r.get('data', '') <= data_fim]
+        rows = sorted(rows, key=lambda r: r.get('timestamp', ''))
         
         output = StringIO()
         
