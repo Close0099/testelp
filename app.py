@@ -5,13 +5,8 @@ import os
 from io import StringIO, BytesIO
 import csv
 from functools import wraps
-import uuid
-
-try:
-    from replit import db as replit_db
-    HAS_REPLIT_DB = True
-except ImportError:
-    HAS_REPLIT_DB = False
+import psycopg2
+from contextlib import contextmanager
 
 try:
     from openpyxl import Workbook
@@ -26,23 +21,37 @@ CORS(app)
 app.secret_key = os.environ.get('SECRET_KEY', 'sua-chave-secreta-mude-em-producao')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '1234')
 
-# Replit DB
-REPLIT_DB_URL = os.environ.get('REPLIT_DB_URL')
-USE_REPLIT_DB = bool(REPLIT_DB_URL and HAS_REPLIT_DB)
+# Replit PostgreSQL
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
-def _replit_get_all():
-    registros = replit_db.get('avaliacoes', [])
-    if not isinstance(registros, list):
-        return []
-    return registros
+@contextmanager
+def get_db():
+    if not DATABASE_URL:
+        raise RuntimeError('DATABASE_URL não configurado')
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
-def _replit_save_all(registros):
-    replit_db['avaliacoes'] = registros
+def init_db():
+    if not DATABASE_URL:
+        return
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS avaliacoes (
+                    id SERIAL PRIMARY KEY,
+                    grau_satisfacao TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    hora TEXT NOT NULL,
+                    dia_semana TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+        conn.commit()
 
-def _replit_add(avaliacao):
-    registros = _replit_get_all()
-    registros.append(avaliacao)
-    _replit_save_all(registros)
+init_db()
 
 def login_required(f):
     @wraps(f)
@@ -82,7 +91,7 @@ def logout():
 @app.route('/api/vote', methods=['POST'])
 def vote():
     try:
-        if not USE_REPLIT_DB:
+        if not DATABASE_URL:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data = request.get_json()
@@ -98,16 +107,13 @@ def vote():
         dias_semana = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
         dia_semana = dias_semana[agora.weekday()]
         
-        registro = {
-            'id': str(uuid.uuid4()),
-            'grau_satisfacao': satisfacao,
-            'data': data_str,
-            'hora': hora_str,
-            'dia_semana': dia_semana,
-            'timestamp': agora.isoformat()
-        }
-
-        _replit_add(registro)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'INSERT INTO avaliacoes (grau_satisfacao, data, hora, dia_semana) VALUES (%s, %s, %s, %s)',
+                    (satisfacao, data_str, hora_str, dia_semana)
+                )
+            conn.commit()
         
         return jsonify({'success': True, 'message': 'Obrigado pelo seu feedback!'})
     
@@ -117,7 +123,7 @@ def vote():
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
     try:
-        if not USE_REPLIT_DB:
+        if not DATABASE_URL:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data_inicio = request.args.get('data_inicio')
@@ -125,9 +131,26 @@ def get_stats():
         pagina = int(request.args.get('pagina', 1))
         limite = 20
         
-        docs = _replit_get_all()
-        if data_inicio and data_fim:
-            docs = [d for d in docs if data_inicio <= d.get('data', '') <= data_fim]
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if data_inicio and data_fim:
+                    cur.execute(
+                        'SELECT grau_satisfacao, data, hora, dia_semana FROM avaliacoes WHERE data BETWEEN %s AND %s',
+                        (data_inicio, data_fim)
+                    )
+                else:
+                    cur.execute('SELECT grau_satisfacao, data, hora, dia_semana FROM avaliacoes')
+                docs = cur.fetchall()
+
+        docs = [
+            {
+                'grau_satisfacao': row[0],
+                'data': row[1],
+                'hora': row[2],
+                'dia_semana': row[3]
+            }
+            for row in docs
+        ]
         total = len(docs)
         
         satisfacao_counts = {}
@@ -154,7 +177,7 @@ def get_stats():
         else:
             ultimas = []
         
-        # ids já são strings no Replit DB
+        # sem ids na resposta
         
         total_paginas = (total + limite - 1) // limite
         
@@ -178,7 +201,7 @@ def get_stats():
 @app.route('/api/stats/comparacao', methods=['GET'])
 def stats_comparacao():
     try:
-        if not USE_REPLIT_DB:
+        if not DATABASE_URL:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         dia1 = request.args.get('dia1')
@@ -187,16 +210,22 @@ def stats_comparacao():
         if not dia1 or not dia2:
             return jsonify({'error': 'Parâmetros dia1 e dia2 obrigatórios'}), 400
         
-        docs1 = [d for d in _replit_get_all() if d.get('data') == dia1]
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT grau_satisfacao FROM avaliacoes WHERE data = %s', (dia1,))
+                docs1 = cur.fetchall()
         stats_dia1 = {}
         for doc in docs1:
-            grau = doc.get('grau_satisfacao')
+            grau = doc[0]
             stats_dia1[grau] = stats_dia1.get(grau, 0) + 1
         
-        docs2 = [d for d in _replit_get_all() if d.get('data') == dia2]
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT grau_satisfacao FROM avaliacoes WHERE data = %s', (dia2,))
+                docs2 = cur.fetchall()
         stats_dia2 = {}
         for doc in docs2:
-            grau = doc.get('grau_satisfacao')
+            grau = doc[0]
             stats_dia2[grau] = stats_dia2.get(grau, 0) + 1
         
         return jsonify({
@@ -218,10 +247,13 @@ def stats_comparacao():
 @app.route('/api/export/excel', methods=['GET'])
 def export_excel():
     try:
-        if not USE_REPLIT_DB:
+        if not DATABASE_URL:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
-        rows = sorted(_replit_get_all(), key=lambda r: r.get('timestamp', ''))
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT grau_satisfacao, data, hora, dia_semana FROM avaliacoes ORDER BY timestamp ASC')
+                rows = cur.fetchall()
         
         if not rows:
             return jsonify({'error': 'Sem dados para exportar'}), 400
@@ -286,7 +318,7 @@ def export_excel():
             writer = csv.writer(output, delimiter=';', quoting=csv.QUOTE_ALL)
             writer.writerow(['Grau de Satisfação', 'Data', 'Hora', 'Dia da Semana'])
             for row in rows:
-                writer.writerow([row.get('grau_satisfacao'), row.get('data'), row.get('hora'), row.get('dia_semana')])
+                writer.writerow([row[0], row[1], row[2], row[3]])
             
             output.seek(0)
             mem_file = BytesIO()
@@ -306,17 +338,23 @@ def export_excel():
 @app.route('/api/export/txt', methods=['POST'])
 def export_txt():
     try:
-        if not USE_REPLIT_DB:
+        if not DATABASE_URL:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data = request.get_json() if request.is_json else {}
         data_inicio = data.get('data_inicio')
         data_fim = data.get('data_fim')
         
-        rows = _replit_get_all()
-        if data_inicio and data_fim:
-            rows = [r for r in rows if data_inicio <= r.get('data', '') <= data_fim]
-        rows = sorted(rows, key=lambda r: r.get('timestamp', ''))
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if data_inicio and data_fim:
+                    cur.execute(
+                        'SELECT grau_satisfacao, data, hora, dia_semana FROM avaliacoes WHERE data BETWEEN %s AND %s ORDER BY timestamp ASC',
+                        (data_inicio, data_fim)
+                    )
+                else:
+                    cur.execute('SELECT grau_satisfacao, data, hora, dia_semana FROM avaliacoes ORDER BY timestamp ASC')
+                rows = cur.fetchall()
         
         output = StringIO()
         
@@ -336,11 +374,11 @@ def export_txt():
         output.write('-' * 100 + '\n')
         
         for row in rows:
-            grau = row.get('grau_satisfacao')
+            grau = row[0]
             emoji = '😊' if grau == 'muito_satisfeito' else '😐' if grau == 'satisfeito' else '😞'
             satisfacao_texto = f"{emoji} {grau.replace('_', ' ').title()}"
             
-            output.write(f"{satisfacao_texto:<25} | {row.get('data'):<12} | {row.get('hora'):<10} | {row.get('dia_semana'):<15}\n")
+            output.write(f"{satisfacao_texto:<25} | {row[1]:<12} | {row[2]:<10} | {row[3]:<15}\n")
         
         output.write('\n' + '=' * 100 + '\n')
         output.write('Fim do Relatório\n')
