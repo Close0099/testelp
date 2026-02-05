@@ -6,8 +6,7 @@ from io import StringIO, BytesIO
 import csv
 from functools import wraps
 
-import firebase_admin
-from firebase_admin import credentials, firestore
+from pymongo import MongoClient
 
 try:
     from openpyxl import Workbook
@@ -19,26 +18,26 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
-# Configuração de sessão
 app.secret_key = os.environ.get('SECRET_KEY', 'sua-chave-secreta-mude-em-producao')
-
-# Código de acesso ao admin
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '1234')
 
-# Inicializar Firebase
-try:
-    cred = credentials.Certificate('testelp-798d4-firebase-adminsdk-fbsvc-72781ceda7.json')
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-    FIRESTORE_ENABLED = True
-except Exception as e:
-    print(f"Erro ao inicializar Firebase: {e}")
-    FIRESTORE_ENABLED = False
-    db = None
+# MongoDB
+MONGODB_URI = os.environ.get('MONGODB_URI')
+MONGODB_DB = os.environ.get('MONGODB_DB', 'project0')
+db = None
 
-# Decorator para proteger rotas admin
+if MONGODB_URI:
+    try:
+        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        db = client.get_default_database()
+        if db is None:
+            db = client[MONGODB_DB]
+        db.command('ping')
+    except Exception as e:
+        print(f"Erro ao conectar MongoDB: {e}")
+        db = None
+
 def login_required(f):
-    """Verifica se o utilizador está autenticado"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'admin_authenticated' not in session:
@@ -48,43 +47,35 @@ def login_required(f):
 
 @app.route('/')
 def index():
-    """Página principal de votação"""
     return render_template('index.html')
 
 @app.route('/login-admin', methods=['GET', 'POST'])
 def login_admin():
-    """Página de login para o admin"""
     if request.method == 'POST':
         password = request.form.get('password', '')
-        
         if password == ADMIN_PASSWORD:
             session['admin_authenticated'] = True
             return redirect(url_for('admin'))
         else:
             return render_template('login.html', error='Código de acesso incorreto!')
-    
     if 'admin_authenticated' in session:
         return redirect(url_for('admin'))
-    
     return render_template('login.html')
 
 @app.route('/admin')
 @login_required
 def admin():
-    """Página administrativa"""
     return render_template('admin.html')
 
 @app.route('/logout')
 def logout():
-    """Faz logout do admin"""
     session.pop('admin_authenticated', None)
     return redirect(url_for('index'))
 
 @app.route('/api/vote', methods=['POST'])
 def vote():
-    """Registra um voto"""
     try:
-        if not FIRESTORE_ENABLED:
+        if not db:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data = request.get_json()
@@ -100,7 +91,7 @@ def vote():
         dias_semana = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
         dia_semana = dias_semana[agora.weekday()]
         
-        db.collection('avaliacoes').add({
+        db['avaliacoes'].insert_one({
             'grau_satisfacao': satisfacao,
             'data': data_str,
             'hora': hora_str,
@@ -108,19 +99,15 @@ def vote():
             'timestamp': agora
         })
         
-        return jsonify({
-            'success': True,
-            'message': 'Obrigado pelo seu feedback!'
-        })
+        return jsonify({'success': True, 'message': 'Obrigado pelo seu feedback!'})
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
-    """Retorna estatísticas das avaliações"""
     try:
-        if not FIRESTORE_ENABLED:
+        if not db:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data_inicio = request.args.get('data_inicio')
@@ -128,42 +115,39 @@ def get_stats():
         pagina = int(request.args.get('pagina', 1))
         limite = 20
         
-        query = db.collection('avaliacoes')
-        
+        query = {}
         if data_inicio and data_fim:
-            query = query.where('data', '>=', data_inicio)
-            query = query.where('data', '<=', data_fim)
+            query = {'data': {'$gte': data_inicio, '$lte': data_fim}}
         
-        docs = query.stream()
-        avaliacoes = []
-        for doc in docs:
-            avaliacoes.append(doc.to_dict())
-        
-        total = len(avaliacoes)
+        docs = list(db['avaliacoes'].find(query))
+        total = len(docs)
         
         satisfacao_counts = {}
         dia_counts = {}
         avaliacoes_diarias = {}
         
-        for av in avaliacoes:
-            grau = av.get('grau_satisfacao')
+        for doc in docs:
+            grau = doc.get('grau_satisfacao')
             satisfacao_counts[grau] = satisfacao_counts.get(grau, 0) + 1
             
-            dia = av.get('dia_semana')
+            dia = doc.get('dia_semana')
             dia_counts[dia] = dia_counts.get(dia, 0) + 1
             
-            data = av.get('data')
+            data = doc.get('data')
             avaliacoes_diarias[data] = avaliacoes_diarias.get(data, 0) + 1
         
         ordem_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
         dia_counts_ordenado = {dia: dia_counts.get(dia, 0) for dia in ordem_dias}
         
         offset = (pagina - 1) * limite
-        ultimas = avaliacoes[-offset-limite:-offset if offset else None]
+        ultimas = docs[-offset-limite:-offset if offset else None]
         if ultimas:
             ultimas.reverse()
         else:
             ultimas = []
+        
+        for av in ultimas:
+            av['_id'] = str(av.get('_id', ''))
         
         total_paginas = (total + limite - 1) // limite
         
@@ -186,9 +170,8 @@ def get_stats():
 
 @app.route('/api/stats/comparacao', methods=['GET'])
 def stats_comparacao():
-    """Compara estatísticas entre dois dias"""
     try:
-        if not FIRESTORE_ENABLED:
+        if not db:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         dia1 = request.args.get('dia1')
@@ -197,31 +180,27 @@ def stats_comparacao():
         if not dia1 or not dia2:
             return jsonify({'error': 'Parâmetros dia1 e dia2 obrigatórios'}), 400
         
-        docs1 = db.collection('avaliacoes').where('data', '==', dia1).stream()
+        docs1 = list(db['avaliacoes'].find({'data': dia1}))
         stats_dia1 = {}
-        total_dia1 = 0
         for doc in docs1:
-            total_dia1 += 1
-            grau = doc.to_dict().get('grau_satisfacao')
+            grau = doc.get('grau_satisfacao')
             stats_dia1[grau] = stats_dia1.get(grau, 0) + 1
         
-        docs2 = db.collection('avaliacoes').where('data', '==', dia2).stream()
+        docs2 = list(db['avaliacoes'].find({'data': dia2}))
         stats_dia2 = {}
-        total_dia2 = 0
         for doc in docs2:
-            total_dia2 += 1
-            grau = doc.to_dict().get('grau_satisfacao')
+            grau = doc.get('grau_satisfacao')
             stats_dia2[grau] = stats_dia2.get(grau, 0) + 1
         
         return jsonify({
             'dia1': {
                 'data': dia1,
-                'total': total_dia1,
+                'total': len(docs1),
                 'distribuicao': stats_dia1
             },
             'dia2': {
                 'data': dia2,
-                'total': total_dia2,
+                'total': len(docs2),
                 'distribuicao': stats_dia2
             }
         })
@@ -231,13 +210,11 @@ def stats_comparacao():
 
 @app.route('/api/export/excel', methods=['GET'])
 def export_excel():
-    """Exporta dados para Excel (.xlsx)"""
     try:
-        if not FIRESTORE_ENABLED:
+        if not db:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
-        docs = db.collection('avaliacoes').order_by('timestamp').stream()
-        rows = [doc.to_dict() for doc in docs]
+        rows = list(db['avaliacoes'].find().sort('timestamp', 1))
         
         if not rows:
             return jsonify({'error': 'Sem dados para exportar'}), 400
@@ -321,22 +298,19 @@ def export_excel():
 
 @app.route('/api/export/txt', methods=['POST'])
 def export_txt():
-    """Exporta dados para TXT com filtro opcional por data"""
     try:
-        if not FIRESTORE_ENABLED:
+        if not db:
             return jsonify({'error': 'Banco de dados não disponível'}), 500
         
         data = request.get_json() if request.is_json else {}
         data_inicio = data.get('data_inicio')
         data_fim = data.get('data_fim')
         
-        query = db.collection('avaliacoes')
+        query = {}
         if data_inicio and data_fim:
-            query = query.where('data', '>=', data_inicio)
-            query = query.where('data', '<=', data_fim)
+            query = {'data': {'$gte': data_inicio, '$lte': data_fim}}
         
-        docs = query.order_by('timestamp').stream()
-        rows = [doc.to_dict() for doc in docs]
+        rows = list(db['avaliacoes'].find(query).sort('timestamp', 1))
         
         output = StringIO()
         
@@ -363,7 +337,7 @@ def export_txt():
             output.write(f"{satisfacao_texto:<25} | {row.get('data'):<12} | {row.get('hora'):<10} | {row.get('dia_semana'):<15}\n")
         
         output.write('\n' + '=' * 100 + '\n')
-        output.write(f'Fim do Relatório\n')
+        output.write('Fim do Relatório\n')
         output.write('=' * 100 + '\n')
         
         output.seek(0)
@@ -383,7 +357,6 @@ def export_txt():
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    """Endpoint de health check"""
     return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
